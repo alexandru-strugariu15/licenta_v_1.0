@@ -4,9 +4,12 @@
   "version": "1.0.0",
   "scripts": {
     "dev": "pnpm --filter web dev",
-    "build": "pnpm --filter web build",
+    "dev:server": "pnpm --filter server dev",
+    "build": "pnpm --filter web build && pnpm --filter server build",
+    "build:web": "pnpm --filter web build",
+    "build:server": "pnpm --filter server build",
     "lint": "pnpm --filter web lint",
-    "test": "pnpm --filter web test"
+    "test": "pnpm --filter web test run"
   },
   "engines": {
     "node": ">=18",

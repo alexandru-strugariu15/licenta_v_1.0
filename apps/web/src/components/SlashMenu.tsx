@@ -5,6 +5,7 @@ import {
   CheckSquare, Quote, Code, Minus,
   Type, Pencil
 } from 'lucide-react'
+import { useAppStore } from '../store/appStore'
 
 interface SlashMenuProps {
   editor: Editor
@@ -93,8 +94,10 @@ export function SlashMenu({ editor }: SlashMenuProps) {
           label: 'Canvas', hint: 'Add a drawing canvas block',
           icon: <Pencil size={14} />, group: 'Media',
           command: () => {
-            // Will insert canvas block (Phase 5)
-            editor.chain().focus().insertContent('<p>[Canvas block – coming in Phase 5]</p>').run()
+            const store = useAppStore.getState()
+            if (store.currentNotebookId && store.currentPageId) {
+              store.updatePage(store.currentNotebookId, store.currentPageId, { showCanvas: true })
+            }
           },
         },
       ],

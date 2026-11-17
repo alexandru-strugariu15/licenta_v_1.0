@@ -1,41 +1,44 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import {
   MousePointer2, PenLine, Highlighter, Eraser,
-  Lasso, Shapes, Type, Undo2, Redo2, GripVertical
+  Lasso, Shapes, Type, Undo2, Redo2, GripVertical, Download, Trash2
 } from 'lucide-react'
 import { getStroke } from 'perfect-freehand'
+import type { CanvasStroke } from '../store/appStore'
 
 type Tool = 'select' | 'pen' | 'highlighter' | 'eraser' | 'lasso' | 'shapes' | 'text'
-
-interface Stroke {
-  id: string
-  tool: 'pen' | 'highlighter'
-  color: string
-  width: number
-  opacity: number
-  points: [number, number, number][]
-}
 
 const INK_COLORS = [
   '#1a1a1a', '#6941C6', '#175CD3', '#067647', '#B54708', '#B42318',
   '#1D2939', '#7F56D9', '#2E90FA', '#12B76A', '#F79009', '#F04438',
 ]
 
-export function CanvasBlock() {
+interface CanvasBlockProps {
+  initialStrokes?: CanvasStroke[]
+  onStrokesChange?: (strokes: CanvasStroke[]) => void
+}
+
+export function CanvasBlock({ initialStrokes = [], onStrokesChange }: CanvasBlockProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [activeTool, setActiveTool] = useState<Tool>('pen')
   const [activeColor, setActiveColor] = useState('#1a1a1a')
   const [strokeWidth, setStrokeWidth] = useState(4)
-  const [strokes, setStrokes] = useState<Stroke[]>([])
+  const [strokes, setStrokes] = useState<CanvasStroke[]>(initialStrokes)
   const [liveStroke, setLiveStroke] = useState<[number, number, number][]>([])
   const [isDrawing, setIsDrawing] = useState(false)
-  const [history, setHistory] = useState<Stroke[][]>([[]])
+  const [history, setHistory] = useState<CanvasStroke[][]>([initialStrokes])
   const [historyIndex, setHistoryIndex] = useState(0)
 
   const WIDTH = 800
   const HEIGHT = 440
 
   const [showAxes, setShowAxes] = useState(true)
+
+  // Notify parent on change
+  const updateStrokes = useCallback((newStrokes: CanvasStroke[]) => {
+    setStrokes(newStrokes)
+    onStrokesChange?.(newStrokes)
+  }, [onStrokesChange])
 
   // Keyboard shortcuts: P, H, E, L
   useEffect(() => {
@@ -198,7 +201,7 @@ export function CanvasBlock() {
     setIsDrawing(false)
 
     if (liveStroke.length > 1 && activeTool !== 'eraser') {
-      const newStroke: Stroke = {
+      const newStroke: CanvasStroke = {
         id: crypto.randomUUID(),
         tool: activeTool === 'highlighter' ? 'highlighter' : 'pen',
         color: activeColor,
@@ -207,7 +210,7 @@ export function CanvasBlock() {
         points: liveStroke,
       }
       const newStrokes = [...strokes, newStroke]
-      setStrokes(newStrokes)
+      updateStrokes(newStrokes)
 
       // Update history
       const newHistory = history.slice(0, historyIndex + 1)
@@ -217,11 +220,11 @@ export function CanvasBlock() {
     }
 
     if (activeTool === 'eraser' && liveStroke.length > 0) {
-      // Erase strokes that are near the eraser path
       const [ex, ey] = liveStroke[liveStroke.length - 1]
-      setStrokes((prev) => prev.filter((stroke) => {
+      const filtered = strokes.filter((stroke) => {
         return !stroke.points.some(([x, y]) => Math.hypot(x - ex, y - ey) < 20)
-      }))
+      })
+      updateStrokes(filtered)
     }
 
     setLiveStroke([])
@@ -231,14 +234,26 @@ export function CanvasBlock() {
     if (historyIndex <= 0) return
     const idx = historyIndex - 1
     setHistoryIndex(idx)
-    setStrokes(history[idx])
+    updateStrokes(history[idx])
   }
 
   const redo = () => {
     if (historyIndex >= history.length - 1) return
     const idx = historyIndex + 1
     setHistoryIndex(idx)
-    setStrokes(history[idx])
+    updateStrokes(history[idx])
+  }
+
+  const handleDownloadPNG = () => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const dataUrl = canvas.toDataURL('image/png')
+    const a = document.createElement('a')
+    a.href = dataUrl
+    a.download = `sketch-${Date.now()}.png`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
   }
 
   const tools: { id: Tool; icon: React.ReactNode; label: string; shortcut: string }[] = [
@@ -254,7 +269,7 @@ export function CanvasBlock() {
   // Keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement) return
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return
       const map: Record<string, Tool> = { p: 'pen', h: 'highlighter', e: 'eraser', l: 'lasso', s: 'select', t: 'text' }
       if (map[e.key.toLowerCase()]) setActiveTool(map[e.key.toLowerCase()])
       if ((e.metaKey || e.ctrlKey) && e.key === 'z') { e.shiftKey ? redo() : undo() }
@@ -264,7 +279,7 @@ export function CanvasBlock() {
   }, [undo, redo])
 
   return (
-    <div className="canvas-block">
+    <div className="canvas-block" style={{ border: '1px solid var(--color-border-subtle)', borderRadius: 12, overflow: 'hidden' }}>
       {/* Canvas */}
       <canvas
         ref={canvasRef}
@@ -278,6 +293,7 @@ export function CanvasBlock() {
             : 'crosshair',
           display: 'block',
           maxHeight: 440,
+          background: 'var(--color-bg-page)',
         }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -291,10 +307,12 @@ export function CanvasBlock() {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          padding: '6px 12px',
-          background: 'var(--color-bg-page)',
+          padding: '8px 12px',
+          background: 'var(--color-bg-subtle)',
           borderTop: '1px solid var(--color-border-subtle)',
           borderRadius: '0 0 12px 12px',
+          flexWrap: 'wrap',
+          gap: 8,
         }}
       >
         {/* Left tools */}
@@ -385,7 +403,7 @@ export function CanvasBlock() {
             onClick={() => {
               const originX = WIDTH / 2 + 60
               const originY = HEIGHT / 2
-              const branch1: Stroke = {
+              const branch1: CanvasStroke = {
                 id: `rl-1-${Date.now()}`,
                 tool: 'pen',
                 color: '#7F56D9',
@@ -399,7 +417,7 @@ export function CanvasBlock() {
                   [originX + 30, originY - 140, 0.6],
                 ],
               }
-              const branch2: Stroke = {
+              const branch2: CanvasStroke = {
                 id: `rl-2-${Date.now()}`,
                 tool: 'pen',
                 color: '#7F56D9',
@@ -413,7 +431,7 @@ export function CanvasBlock() {
                   [originX + 30, originY + 140, 0.6],
                 ],
               }
-              setStrokes((prev) => [...prev, branch1, branch2])
+              updateStrokes([...strokes, branch1, branch2])
             }}
             data-tooltip="Plot Root Locus trajectories"
             style={{ fontSize: 11, padding: '3px 7px' }}
@@ -423,10 +441,22 @@ export function CanvasBlock() {
 
           <button
             className="btn btn-xs btn-ghost"
-            onClick={() => setStrokes([])}
-            style={{ fontSize: 11, color: 'var(--color-text-tertiary)', padding: '3px 6px' }}
+            onClick={handleDownloadPNG}
+            data-tooltip="Export PNG"
+            aria-label="Download PNG"
+            style={{ padding: '3px 6px' }}
           >
-            Clear
+            <Download size={13} />
+          </button>
+
+          <button
+            className="btn btn-xs btn-ghost"
+            onClick={() => updateStrokes([])}
+            style={{ fontSize: 11, color: '#B42318', padding: '3px 6px' }}
+            data-tooltip="Clear drawing"
+            aria-label="Clear canvas"
+          >
+            <Trash2 size={13} />
           </button>
         </div>
       </div>
