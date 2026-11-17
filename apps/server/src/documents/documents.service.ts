@@ -1,4 +1,6 @@
-import { Injectable, NotFoundException } from '@nestjs/common'
+import { Injectable, NotFoundException, Logger } from '@nestjs/common'
+import * as fs from 'fs'
+import * as path from 'path'
 
 export interface ServerDocument {
   id: string
@@ -15,10 +17,46 @@ export interface ServerDocument {
 
 @Injectable()
 export class DocumentsService {
+  private readonly logger = new Logger(DocumentsService.name)
   private documents = new Map<string, ServerDocument>()
+  private dataDir = path.resolve(process.cwd(), '.data')
+  private dataFile = path.join(this.dataDir, 'documents.json')
 
   constructor() {
+    this.initStorage()
+  }
+
+  private initStorage() {
+    try {
+      if (!fs.existsSync(this.dataDir)) {
+        fs.mkdirSync(this.dataDir, { recursive: true })
+      }
+
+      if (fs.existsSync(this.dataFile)) {
+        const raw = fs.readFileSync(this.dataFile, 'utf-8')
+        const parsed: ServerDocument[] = JSON.parse(raw)
+        parsed.forEach((doc) => this.documents.set(doc.id, doc))
+        this.logger.log(`Loaded ${parsed.length} documents from persistent store (${this.dataFile})`)
+        return
+      }
+    } catch (err) {
+      this.logger.warn(`Failed to read from persistent store: ${err.message}`)
+    }
+
     this.seedDemoDocuments()
+    this.saveToDisk()
+  }
+
+  private saveToDisk() {
+    try {
+      if (!fs.existsSync(this.dataDir)) {
+        fs.mkdirSync(this.dataDir, { recursive: true })
+      }
+      const data = Array.from(this.documents.values())
+      fs.writeFileSync(this.dataFile, JSON.stringify(data, null, 2), 'utf-8')
+    } catch (err) {
+      this.logger.error(`Failed to write to persistent store: ${err.message}`)
+    }
   }
 
   private seedDemoDocuments() {
@@ -107,6 +145,7 @@ export class DocumentsService {
       createdAt: new Date().toISOString(),
     }
     this.documents.set(id, newDoc)
+    this.saveToDisk()
     return newDoc
   }
 
@@ -118,6 +157,7 @@ export class DocumentsService {
       updatedAt: new Date().toISOString(),
     }
     this.documents.set(id, updated)
+    this.saveToDisk()
     return updated
   }
 
@@ -126,6 +166,7 @@ export class DocumentsService {
       throw new NotFoundException(`Document with ID ${id} not found`)
     }
     this.documents.delete(id)
+    this.saveToDisk()
     return { success: true }
   }
 }

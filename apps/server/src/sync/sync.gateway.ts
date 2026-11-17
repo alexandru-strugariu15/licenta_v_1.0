@@ -10,10 +10,14 @@ import {
 } from '@nestjs/websockets'
 import { Server, Socket } from 'socket.io'
 import { Logger } from '@nestjs/common'
+import { CrdtRoomManager, RoomPeerInfo } from './crdt-room.manager'
 
-interface RoomPeer {
+interface P2PPeer {
   socketId: string
   peerId: string
+  name: string
+  device: string
+  type: 'tablet' | 'laptop' | 'phone'
   joinedAt: number
 }
 
@@ -28,179 +32,238 @@ export class SyncGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
 
   private readonly logger = new Logger(SyncGateway.name)
 
-  // Map of document room -> Set of socket IDs
-  private documentRooms = new Map<string, Set<string>>()
+  // Map of socketId -> Set of document rooms joined
+  private clientJoinedRooms = new Map<string, Set<string>>()
 
-  // Map of P2P signaling room -> Map of peerId -> RoomPeer
-  private p2pRooms = new Map<string, Map<string, RoomPeer>>()
+  // Map of peerId -> P2PPeer
+  private proximityPeers = new Map<string, P2PPeer>()
+
+  constructor(private readonly crdtRoomManager: CrdtRoomManager) {}
 
   afterInit() {
-    this.logger.log('WebSocket Sync & WebRTC Signaling Gateway initialized')
+    this.logger.log('CRDT & WebRTC Signaling Gateway initialized with full Yjs Sync Protocol')
   }
 
   handleConnection(client: Socket) {
     this.logger.log(`Client connected: ${client.id}`)
+    this.clientJoinedRooms.set(client.id, new Set())
   }
 
   handleDisconnect(client: Socket) {
     this.logger.log(`Client disconnected: ${client.id}`)
 
-    // Clean up document rooms
-    for (const [roomId, sockets] of this.documentRooms.entries()) {
-      if (sockets.has(client.id)) {
-        sockets.delete(client.id)
+    // Clean up CRDT document rooms
+    const joined = this.clientJoinedRooms.get(client.id)
+    if (joined) {
+      for (const roomId of joined) {
+        this.crdtRoomManager.removePeer(roomId, client.id)
         client.to(roomId).emit('crdt-peer-left', { socketId: client.id })
-        if (sockets.size === 0) {
-          this.documentRooms.delete(roomId)
-        }
       }
+      this.clientJoinedRooms.delete(client.id)
     }
 
-    // Clean up P2P signaling rooms
-    for (const [roomId, peers] of this.p2pRooms.entries()) {
-      for (const [peerId, peer] of peers.entries()) {
-        if (peer.socketId === client.id) {
-          peers.delete(peerId)
-          client.to(`p2p:${roomId}`).emit('webrtc-peer-disconnected', { peerId })
-          this.logger.log(`P2P peer disconnected: ${peerId} from room ${roomId}`)
-          if (peers.size === 0) {
-            this.p2pRooms.delete(roomId)
-          }
-          break
-        }
+    // Clean up P2P proximity peers
+    for (const [peerId, peer] of this.proximityPeers.entries()) {
+      if (peer.socketId === client.id) {
+        this.proximityPeers.delete(peerId)
+        this.server.emit('p2p-peer-lost', { peerId })
+        this.logger.log(`P2P proximity peer lost: ${peer.name} (${peerId})`)
+        break
       }
     }
   }
 
-  // --- CRDT Multiplayer Relay ---
+  // ===========================================================================
+  // CRDT Yjs Protocol Handlers
+  // ===========================================================================
 
+  /**
+   * Client joins a document room.
+   * Server sends back its state vector and initial peers list.
+   */
   @SubscribeMessage('crdt-join-room')
   handleJoinRoom(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { roomId: string; userId?: string }
+    @MessageBody() data: { roomId: string; user?: { id: string; name: string; color: string } }
   ) {
-    const { roomId, userId } = data
+    const { roomId, user } = data
     client.join(roomId)
 
-    if (!this.documentRooms.has(roomId)) {
-      this.documentRooms.set(roomId, new Set())
-    }
-    this.documentRooms.get(roomId).add(client.id)
+    // Track client's joined rooms
+    const joined = this.clientJoinedRooms.get(client.id) || new Set()
+    joined.add(roomId)
+    this.clientJoinedRooms.set(client.id, joined)
 
-    this.logger.log(`Client ${client.id} joined document room: ${roomId}`)
-
-    // Notify room of new peer
-    client.to(roomId).emit('crdt-peer-joined', {
+    const peerInfo: RoomPeerInfo = {
       socketId: client.id,
-      userId: userId || 'anonymous',
-    })
+      userId: user?.id || `user-${client.id.slice(0, 5)}`,
+      userName: user?.name || 'Anonymous Contributor',
+      userColor: user?.color || '#7F56D9',
+    }
+
+    const peersInRoom = this.crdtRoomManager.addPeer(roomId, peerInfo)
+
+    // Notify other peers in room
+    client.to(roomId).emit('crdt-peer-joined', { peer: peerInfo })
+
+    // Calculate server's state vector for SyncStep1
+    const serverStateVector = this.crdtRoomManager.encodeStateVector(roomId)
+    const base64StateVector = Buffer.from(serverStateVector).toString('base64')
 
     return {
       status: 'joined',
       roomId,
-      activeClients: this.documentRooms.get(roomId).size,
+      serverStateVector: base64StateVector,
+      peers: peersInRoom,
     }
   }
 
+  /**
+   * Yjs SyncStep1: Client sends its state vector.
+   * Server responds with the binary diff (SyncStep2).
+   */
+  @SubscribeMessage('crdt-sync-step-1')
+  handleSyncStep1(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { roomId: string; stateVector: string }
+  ) {
+    const { roomId, stateVector } = data
+    const clientVectorBuffer = Buffer.from(stateVector, 'base64')
+    const diffUpdate = this.crdtRoomManager.encodeDiffAgainstStateVector(roomId, clientVectorBuffer)
+
+    return {
+      roomId,
+      update: Buffer.from(diffUpdate).toString('base64'),
+    }
+  }
+
+  /**
+   * Yjs Update: Client committed character or stroke edits.
+   * Server merges update into Y.Doc and relays to all peers.
+   */
   @SubscribeMessage('crdt-update')
   handleCrdtUpdate(
     @ConnectedSocket() client: Socket,
-    @MessageBody() payload: { roomId: string; update: any }
+    @MessageBody() payload: { roomId: string; update: string }
   ) {
-    // Relay CRDT binary update or state vector delta to all other clients in room
-    client.to(payload.roomId).emit('crdt-update', {
+    const { roomId, update } = payload
+    const updateBuffer = Buffer.from(update, 'base64')
+
+    // Apply to server's Y.Doc (in-memory + debounced persistence)
+    this.crdtRoomManager.applyClientUpdate(roomId, updateBuffer, client.id)
+
+    // Relay to other room members
+    client.to(roomId).emit('crdt-update', {
       senderId: client.id,
-      update: payload.update,
+      update,
       timestamp: Date.now(),
     })
+
+    return { status: 'acknowledged' }
   }
 
+  /**
+   * Live Awareness: broadcasting collaborator cursors, selection, typing status.
+   */
   @SubscribeMessage('crdt-awareness')
   handleCrdtAwareness(
     @ConnectedSocket() client: Socket,
     @MessageBody() payload: { roomId: string; awareness: any }
   ) {
-    // Relay cursor position, selection, user info
+    this.crdtRoomManager.updatePeerAwareness(payload.roomId, client.id, payload.awareness)
+
     client.to(payload.roomId).emit('crdt-awareness', {
       senderId: client.id,
       awareness: payload.awareness,
     })
   }
 
-  // --- WebRTC P2P Proximity Signaling ---
+  // ===========================================================================
+  // WebRTC P2P Proximity Signaling Handlers
+  // ===========================================================================
 
-  @SubscribeMessage('webrtc-join')
-  handleWebRtcJoin(
+  /**
+   * Register local device in the P2P proximity radar
+   */
+  @SubscribeMessage('p2p-register')
+  handleP2pRegister(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { roomId: string; peerId: string }
+    @MessageBody() data: { peerId: string; name: string; device: string; type: 'tablet' | 'laptop' | 'phone' }
   ) {
-    const { roomId, peerId } = data
-    const roomChannel = `p2p:${roomId}`
-    client.join(roomChannel)
-
-    if (!this.p2pRooms.has(roomId)) {
-      this.p2pRooms.set(roomId, new Map())
+    const peer: P2PPeer = {
+      socketId: client.id,
+      peerId: data.peerId,
+      name: data.name,
+      device: data.device,
+      type: data.type,
+      joinedAt: Date.now(),
     }
 
-    const peersInRoom = this.p2pRooms.get(roomId)
-    const existingPeerIds = Array.from(peersInRoom.keys())
+    this.proximityPeers.set(data.peerId, peer)
+    this.logger.log(`P2P peer registered: ${peer.name} on ${peer.device}`)
 
-    peersInRoom.set(peerId, {
-      socketId: client.id,
-      peerId,
-      joinedAt: Date.now(),
-    })
+    // Broadcast new peer to everyone on local network
+    client.broadcast.emit('p2p-peer-discovered', peer)
 
-    this.logger.log(`WebRTC Peer ${peerId} joined signaling room: ${roomId}`)
-
-    // Tell newcomer about existing peers
-    client.emit('webrtc-existing-peers', { peers: existingPeerIds })
-
-    // Tell existing peers about newcomer
-    client.to(roomChannel).emit('webrtc-peer-joined', { peerId })
-
-    return { status: 'joined', roomId, peersCount: peersInRoom.size }
+    return {
+      status: 'registered',
+      peers: Array.from(this.proximityPeers.values()).filter((p) => p.peerId !== data.peerId),
+    }
   }
 
-  @SubscribeMessage('webrtc-offer')
-  handleWebRtcOffer(
+  /**
+   * Get active proximity peers
+   */
+  @SubscribeMessage('p2p-list-peers')
+  handleP2pListPeers() {
+    return Array.from(this.proximityPeers.values())
+  }
+
+  /**
+   * Relay WebRTC SDP Offer to target peer
+   */
+  @SubscribeMessage('p2p-signal-offer')
+  handleP2pSignalOffer(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { roomId: string; targetPeerId: string; offer: any; fromPeerId: string }
+    @MessageBody() data: { targetPeerId: string; fromPeerId: string; offer: any }
   ) {
-    const peers = this.p2pRooms.get(data.roomId)
-    const target = peers?.get(data.targetPeerId)
+    const target = this.proximityPeers.get(data.targetPeerId)
     if (target) {
-      this.server.to(target.socketId).emit('webrtc-offer', {
+      this.server.to(target.socketId).emit('p2p-signal-offer', {
         fromPeerId: data.fromPeerId,
         offer: data.offer,
       })
     }
   }
 
-  @SubscribeMessage('webrtc-answer')
-  handleWebRtcAnswer(
+  /**
+   * Relay WebRTC SDP Answer back to originating peer
+   */
+  @SubscribeMessage('p2p-signal-answer')
+  handleP2pSignalAnswer(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { roomId: string; targetPeerId: string; answer: any; fromPeerId: string }
+    @MessageBody() data: { targetPeerId: string; fromPeerId: string; answer: any }
   ) {
-    const peers = this.p2pRooms.get(data.roomId)
-    const target = peers?.get(data.targetPeerId)
+    const target = this.proximityPeers.get(data.targetPeerId)
     if (target) {
-      this.server.to(target.socketId).emit('webrtc-answer', {
+      this.server.to(target.socketId).emit('p2p-signal-answer', {
         fromPeerId: data.fromPeerId,
         answer: data.answer,
       })
     }
   }
 
-  @SubscribeMessage('webrtc-ice-candidate')
-  handleWebRtcIceCandidate(
+  /**
+   * Relay WebRTC ICE Candidate between peers
+   */
+  @SubscribeMessage('p2p-ice-candidate')
+  handleP2pIceCandidate(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { roomId: string; targetPeerId: string; candidate: any; fromPeerId: string }
+    @MessageBody() data: { targetPeerId: string; fromPeerId: string; candidate: any }
   ) {
-    const peers = this.p2pRooms.get(data.roomId)
-    const target = peers?.get(data.targetPeerId)
+    const target = this.proximityPeers.get(data.targetPeerId)
     if (target) {
-      this.server.to(target.socketId).emit('webrtc-ice-candidate', {
+      this.server.to(target.socketId).emit('p2p-ice-candidate', {
         fromPeerId: data.fromPeerId,
         candidate: data.candidate,
       })

@@ -113,16 +113,57 @@ const GRAPH_NODES: GraphNode[] = [
 
 export function KnowledgeGraphPage() {
   const navigate = useNavigate()
-  const { setCurrentPage, setCurrentNotebook } = useAppStore()
+  const { notebooks, setCurrentPage, setCurrentNotebook } = useAppStore()
   const [search, setSearch] = useState('')
   const [selectedNotebook, setSelectedNotebook] = useState<string>('all')
-  const [selectedNodeId, setSelectedNodeId] = useState<string>('n-1')
+  const [selectedNodeId, setSelectedNodeId] = useState<string>('')
   const [zoom, setZoom] = useState(1)
 
-  const selectedNode = GRAPH_NODES.find((n) => n.id === selectedNodeId)
+  const dynamicNodes: GraphNode[] = useMemo(() => {
+    const list: GraphNode[] = []
+    const colors = ['#7F56D9', '#0BA5EC', '#F79009', '#12B76A', '#EE46BC', '#6172F3']
+    let totalPages = 0
+    notebooks.forEach((nb) => { totalPages += nb.pages.length })
+
+    const centerX = 440
+    const centerY = 320
+    let idx = 0
+
+    notebooks.forEach((nb, nbIdx) => {
+      nb.pages.forEach((page) => {
+        const angle = (idx / (totalPages || 1)) * 2 * Math.PI
+        const radiusDist = 180 + (idx % 2) * 85
+        const x = centerX + Math.cos(angle) * radiusDist
+        const y = centerY + Math.sin(angle) * (radiusDist * 0.72)
+
+        const siblingIds = nb.pages.filter((p) => p.id !== page.id).map((p) => `node-${p.id}`)
+
+        list.push({
+          id: `node-${page.id}`,
+          pageId: page.id,
+          title: page.title,
+          notebook: nb.name,
+          emoji: page.icon || nb.emoji,
+          x: Math.round(x),
+          y: Math.round(y),
+          radius: 30 + (idx % 3) * 4,
+          color: colors[nbIdx % colors.length],
+          connections: siblingIds.slice(0, 2),
+          tags: [nb.name.split(' ')[0], 'Lecture', 'CRDT'],
+        })
+        idx++
+      })
+    })
+
+    return list
+  }, [notebooks])
+
+  const effectiveNodes = dynamicNodes.length > 0 ? dynamicNodes : GRAPH_NODES
+  const activeSelectedId = selectedNodeId || effectiveNodes[0]?.id || ''
+  const selectedNode = effectiveNodes.find((n) => n.id === activeSelectedId) || effectiveNodes[0]
 
   const filteredNodes = useMemo(() => {
-    return GRAPH_NODES.filter((node) => {
+    return effectiveNodes.filter((node) => {
       const matchSearch =
         !search ||
         node.title.toLowerCase().includes(search.toLowerCase()) ||
@@ -131,15 +172,15 @@ export function KnowledgeGraphPage() {
         selectedNotebook === 'all' || node.notebook === selectedNotebook
       return matchSearch && matchNotebook
     })
-  }, [search, selectedNotebook])
+  }, [effectiveNodes, search, selectedNotebook])
 
   const edges = useMemo(() => {
     const list: { from: GraphNode; to: GraphNode }[] = []
     const seen = new Set<string>()
 
-    GRAPH_NODES.forEach((node) => {
+    effectiveNodes.forEach((node) => {
       node.connections.forEach((targetId) => {
-        const target = GRAPH_NODES.find((n) => n.id === targetId)
+        const target = effectiveNodes.find((n) => n.id === targetId)
         if (target) {
           const key = [node.id, target.id].sort().join('-')
           if (!seen.has(key)) {
@@ -150,12 +191,13 @@ export function KnowledgeGraphPage() {
       })
     })
     return list
-  }, [])
+  }, [effectiveNodes])
 
   const handleOpenNote = (pageId: string) => {
+    const targetNb = notebooks.find((nb) => nb.pages.some((p) => p.id === pageId))
+    if (targetNb) setCurrentNotebook(targetNb.id)
     setCurrentPage(pageId)
-    setCurrentNotebook('nb-1')
-    navigate('/')
+    navigate(`/page/${pageId}`)
   }
 
   return (
@@ -193,7 +235,7 @@ export function KnowledgeGraphPage() {
                 Knowledge Graph
               </h1>
               <span className="badge badge-brand" style={{ fontSize: 11 }}>
-                {GRAPH_NODES.length} notes connected
+                {effectiveNodes.length} notes connected
               </span>
             </div>
             <div style={{ fontSize: 12, color: 'var(--color-text-tertiary)' }}>
@@ -324,7 +366,7 @@ export function KnowledgeGraphPage() {
 
             {/* Nodes */}
             {filteredNodes.map((node) => {
-              const isSelected = selectedNodeId === node.id
+              const isSelected = selectedNode?.id === node.id
               return (
                 <g
                   key={node.id}

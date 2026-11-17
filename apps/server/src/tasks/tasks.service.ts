@@ -1,4 +1,6 @@
-import { Injectable, NotFoundException } from '@nestjs/common'
+import { Injectable, NotFoundException, Logger } from '@nestjs/common'
+import * as fs from 'fs'
+import * as path from 'path'
 
 export interface ServerTask {
   id: string
@@ -14,10 +16,46 @@ export interface ServerTask {
 
 @Injectable()
 export class TasksService {
+  private readonly logger = new Logger(TasksService.name)
   private tasks = new Map<string, ServerTask>()
+  private dataDir = path.resolve(process.cwd(), '.data')
+  private dataFile = path.join(this.dataDir, 'tasks.json')
 
   constructor() {
+    this.initStorage()
+  }
+
+  private initStorage() {
+    try {
+      if (!fs.existsSync(this.dataDir)) {
+        fs.mkdirSync(this.dataDir, { recursive: true })
+      }
+
+      if (fs.existsSync(this.dataFile)) {
+        const raw = fs.readFileSync(this.dataFile, 'utf-8')
+        const parsed: ServerTask[] = JSON.parse(raw)
+        parsed.forEach((t) => this.tasks.set(t.id, t))
+        this.logger.log(`Loaded ${parsed.length} tasks from persistent store (${this.dataFile})`)
+        return
+      }
+    } catch (err) {
+      this.logger.warn(`Failed to read tasks store: ${err.message}`)
+    }
+
     this.seedDemoTasks()
+    this.saveToDisk()
+  }
+
+  private saveToDisk() {
+    try {
+      if (!fs.existsSync(this.dataDir)) {
+        fs.mkdirSync(this.dataDir, { recursive: true })
+      }
+      const data = Array.from(this.tasks.values())
+      fs.writeFileSync(this.dataFile, JSON.stringify(data, null, 2), 'utf-8')
+    } catch (err) {
+      this.logger.error(`Failed to write tasks store: ${err.message}`)
+    }
   }
 
   private seedDemoTasks() {
@@ -102,6 +140,7 @@ export class TasksService {
       createdAt: new Date().toISOString(),
     }
     this.tasks.set(id, newTask)
+    this.saveToDisk()
     return newTask
   }
 
@@ -112,6 +151,7 @@ export class TasksService {
     }
     task.done = !task.done
     this.tasks.set(id, task)
+    this.saveToDisk()
     return task
   }
 
@@ -120,6 +160,7 @@ export class TasksService {
       throw new NotFoundException(`Task with ID ${id} not found`)
     }
     this.tasks.delete(id)
+    this.saveToDisk()
     return { success: true }
   }
 }

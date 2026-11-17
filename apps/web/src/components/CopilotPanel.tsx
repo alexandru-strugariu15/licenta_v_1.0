@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { Sparkles, X, Send, ChevronRight, Loader, Pencil, FileText, Check } from 'lucide-react'
 import { useAppStore } from '../store/appStore'
+import { apiClient } from '../services/apiClient'
 
 type CopilotTab = 'ask' | 'drawing' | 'tasks' | 'summary'
 
@@ -50,23 +51,41 @@ export function CopilotPanel() {
   async function handleSend() {
     if (!input.trim() || isLoading) return
 
-    const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: input }
+    const queryText = input.trim()
+    const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: queryText }
     setMessages((m) => [...m, userMsg])
     setInput('')
     setIsLoading(true)
 
-    // Simulate AI response
-    await new Promise((r) => setTimeout(r, 1200))
+    // Call real backend RAG endpoint with graceful fallback
+    const currentNotebookId = useAppStore.getState().currentNotebookId
+    const apiRes = await apiClient.askCopilot(queryText, currentNotebookId || undefined)
 
-    const aiMsg: Message = {
-      id: crypto.randomUUID(),
-      role: 'ai',
-      content: 'Based on your notes, this topic is covered in the context of control systems theory. The relationship between input and output stability is defined by the system\'s transfer function poles [1].\n\nI found 3 relevant sections in your notes that discuss this.',
-      citations: [
-        { index: 1, title: 'Feedback Stability', quote: 'poles of the closed-loop transfer function' },
-      ],
+    if (apiRes) {
+      const aiMsg: Message = {
+        id: crypto.randomUUID(),
+        role: 'ai',
+        content: apiRes.answer,
+        citations: apiRes.citations.map((c) => ({
+          index: c.index,
+          title: c.title,
+          quote: c.quote,
+        })),
+      }
+      setMessages((m) => [...m, aiMsg])
+    } else {
+      // Local fallback simulation when backend is offline
+      await new Promise((r) => setTimeout(r, 600))
+      const aiMsg: Message = {
+        id: crypto.randomUUID(),
+        role: 'ai',
+        content: 'Based on your notes, this topic is covered in your control systems curriculum [1]. The relationship between input and output stability is defined by the transfer function poles.',
+        citations: [
+          { index: 1, title: 'Feedback Stability', quote: 'all closed-loop poles must lie in the left half-plane' },
+        ],
+      }
+      setMessages((m) => [...m, aiMsg])
     }
-    setMessages((m) => [...m, aiMsg])
     setIsLoading(false)
   }
 
@@ -296,12 +315,15 @@ export function CopilotPanel() {
             <button
               className="btn btn-secondary"
               style={{ justifyContent: 'flex-start', padding: '10px 14px' }}
-              onClick={() => {
+              onClick={async () => {
                 setRecognitionLoading(true)
-                setTimeout(() => {
+                const res = await apiClient.describeDrawing(14)
+                if (res) {
+                  setRecognizedResult(`Identified Structure: ${res.summary}\nCharacteristic: ${res.formula} (Confidence: ${Math.round(res.confidence * 100)}%)`)
+                } else {
                   setRecognizedResult('Root Locus plot: 2 open-loop poles at s = -1 ± 2j and 1 zero at s = -3. Trajectory crosses imaginary axis at K_crit = 4.2.')
-                  setRecognitionLoading(false)
-                }, 1000)
+                }
+                setRecognitionLoading(false)
               }}
             >
               <Sparkles size={15} style={{ color: 'var(--color-brand-600)' }} />

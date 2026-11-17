@@ -6,6 +6,12 @@ import TaskItem from '@tiptap/extension-task-item'
 import Underline from '@tiptap/extension-underline'
 import Highlight from '@tiptap/extension-highlight'
 import Link from '@tiptap/extension-link'
+import Table from '@tiptap/extension-table'
+import TableRow from '@tiptap/extension-table-row'
+import TableCell from '@tiptap/extension-table-cell'
+import TableHeader from '@tiptap/extension-table-header'
+import Collaboration from '@tiptap/extension-collaboration'
+import type * as Y from 'yjs'
 import { SlashMenu } from './SlashMenu'
 import {
   Bold, Italic, Underline as UnderlineIcon, Strikethrough,
@@ -15,11 +21,12 @@ import { useRef, useCallback } from 'react'
 
 interface RichEditorProps {
   content?: string
+  ydoc?: Y.Doc
   onChange?: (html: string) => void
   placeholder?: string
 }
 
-export function RichEditor({ content, onChange, placeholder = 'Write something, or press \'/\' for commands…' }: RichEditorProps) {
+export function RichEditor({ content, ydoc, onChange, placeholder = 'Write something, or press \'/\' for commands…' }: RichEditorProps) {
   const editorRef = useRef<HTMLDivElement>(null)
 
   const editor = useEditor({
@@ -27,15 +34,21 @@ export function RichEditor({ content, onChange, placeholder = 'Write something, 
       StarterKit.configure({
         heading: { levels: [1, 2, 3] },
         codeBlock: { languageClassPrefix: 'language-' },
+        history: ydoc ? false : undefined,
       }),
+      ...(ydoc ? [Collaboration.configure({ document: ydoc })] : []),
       Placeholder.configure({ placeholder }),
       TaskList,
       TaskItem.configure({ nested: true }),
       Underline,
       Highlight.configure({ multicolor: false }),
       Link.configure({ openOnClick: true, autolink: true }),
+      Table.configure({ resizable: true }),
+      TableRow,
+      TableHeader,
+      TableCell,
     ],
-    content: content || defaultContent,
+    content: ydoc ? undefined : content || defaultContent,
     editorProps: {
       attributes: { class: 'tiptap-editor', spellcheck: 'true' },
     },

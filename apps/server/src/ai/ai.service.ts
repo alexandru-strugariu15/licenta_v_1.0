@@ -1,5 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common'
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common'
 import { DocumentsService } from '../documents/documents.service'
+import { VectorStoreService } from './vector-store.service'
 
 export interface AiCitation {
   index: number
@@ -12,6 +13,7 @@ export interface AskAiResponse {
   answer: string
   citations: AiCitation[]
   retrievedCount: number
+  similarityScores?: number[]
 }
 
 export interface ExtractedTask {
@@ -23,125 +25,109 @@ export interface ExtractedTask {
 }
 
 @Injectable()
-export class AiService {
+export class AiService implements OnModuleInit {
   private readonly logger = new Logger(AiService.name)
 
-  constructor(private readonly documentsService: DocumentsService) {}
+  constructor(
+    private readonly documentsService: DocumentsService,
+    private readonly vectorStoreService: VectorStoreService
+  ) {}
+
+  onModuleInit() {
+    this.indexExistingDocuments()
+  }
+
+  /**
+   * Index all current notes into the vector store
+   */
+  indexExistingDocuments() {
+    const docs = this.documentsService.findAll()
+    for (const doc of docs) {
+      this.vectorStoreService.indexDocument(doc.id, doc.title, doc.notebookId, doc.content)
+    }
+    this.logger.log(`Initialized Vector Store with ${docs.length} knowledge base documents`)
+  }
 
   /**
    * RAG Query Pipeline:
-   * 1. Retrieves documents from storage.
-   * 2. Chunks documents into passages.
-   * 3. Calculates cosine/keyword relevance to query.
-   * 4. Forms grounded response with source citations.
+   * 1. Vector Cosine Similarity Search over chunked passages.
+   * 2. Retrieves top-K context.
+   * 3. Synthesizes strictly grounded answer with bracketed source citations [n].
    */
   async askNotes(query: string, notebookId?: string): Promise<AskAiResponse> {
-    const allDocs = this.documentsService.findAll()
-    const targetDocs = notebookId ? allDocs.filter((d) => d.notebookId === notebookId) : allDocs
+    const results = this.vectorStoreService.similaritySearch(query, 3, notebookId)
 
-    // Tokenize query words
-    const queryTokens = query.toLowerCase().split(/\W+/).filter((t) => t.length > 2)
-
-    interface ScoredChunk {
-      documentId: string
-      title: string
-      quote: string
-      score: number
-    }
-
-    const scoredChunks: ScoredChunk[] = []
-
-    for (const doc of targetDocs) {
-      // Clean HTML tags to raw text
-      const cleanText = doc.content.replace(/<[^>]*>/g, ' ')
-      const sentences = cleanText.split(/(?<=[.!?])\s+/).filter((s) => s.trim().length > 15)
-
-      for (const sentence of sentences) {
-        let score = 0
-        const lowerSentence = sentence.toLowerCase()
-        const lowerTitle = doc.title.toLowerCase()
-
-        for (const token of queryTokens) {
-          if (lowerTitle.includes(token)) score += 3
-          if (lowerSentence.includes(token)) score += 1
-        }
-
-        if (score > 0) {
-          scoredChunks.push({
-            documentId: doc.id,
-            title: doc.title,
-            quote: sentence.trim(),
-            score,
-          })
-        }
-      }
-    }
-
-    // Sort descending by relevance score
-    scoredChunks.sort((a, b) => b.score - a.score)
-    const topChunks = scoredChunks.slice(0, 3)
-
-    if (topChunks.length === 0) {
+    if (results.length === 0 || results[0].similarity < 0.1) {
       return {
-        answer: 'I searched across your notes but did not find any passages directly relevant to this query. Try adding more detailed notes or refining the terms.',
+        answer: 'I searched your notes in the vector index, but found no passages relevant to this inquiry. Please verify the terms or add relevant lecture notes.',
         citations: [],
         retrievedCount: 0,
       }
     }
 
-    const citations: AiCitation[] = topChunks.map((chunk, idx) => ({
+    const citations: AiCitation[] = results.map((res, idx) => ({
       index: idx + 1,
-      documentId: chunk.documentId,
-      title: chunk.title,
-      quote: chunk.quote,
+      documentId: res.chunk.documentId,
+      title: res.chunk.documentTitle,
+      quote: res.chunk.text.slice(0, 160) + '…',
     }))
 
-    // Formulate synthesized response referencing citations
-    let answer = `Based on your notes in **${topChunks[0].title}** [1]`
-    if (topChunks.length > 1) {
-      answer += ` and **${topChunks[1].title}** [2]`
-    }
-    answer += `, here is the synthesis:\n\n`
+    // Construct grounded response quoting the sources
+    const primaryChunk = results[0].chunk
+    let answer = `According to your notes in **${primaryChunk.documentTitle}** [1]`
 
-    // Extract core insights
-    topChunks.forEach((chunk, i) => {
-      answer += `• ${chunk.quote} [${i + 1}]\n`
+    if (results.length > 1 && results[1].chunk.documentId !== primaryChunk.documentId) {
+      answer += ` and **${results[1].chunk.documentTitle}** [2]`
+    }
+
+    answer += `:\n\n`
+
+    results.forEach((res, i) => {
+      answer += `• ${res.chunk.text} [${i + 1}]\n`
     })
 
-    answer += `\nAll claims above are grounded directly in your stored lecture notes.`
+    answer += `\n*Grounded response with ${results.length} citations from your knowledge base.*`
 
     return {
       answer,
       citations,
-      retrievedCount: topChunks.length,
+      retrievedCount: results.length,
+      similarityScores: results.map((r) => Math.round(r.similarity * 100) / 100),
     }
   }
 
   /**
-   * Action item extraction from note content
+   * Automatic Action Item Extraction from text
    */
   async extractTasks(content: string): Promise<ExtractedTask[]> {
     const cleanText = content.replace(/<[^>]*>/g, ' ')
-    const lines = cleanText.split(/[\n.]+/).map((l) => l.trim()).filter(Boolean)
+    const sentences = cleanText.split(/[\n.]+/).map((l) => l.trim()).filter(Boolean)
 
-    const actionKeywords = ['review', 'simulate', 'write', 'implement', 'finish', 'prepare', 'calculate', 'verify', 'trebuie', 'de facut']
+    const actionTriggers = [
+      'review', 'simulate', 'write', 'implement', 'finish',
+      'prepare', 'calculate', 'verify', 'trebuie', 'de facut', 'solve'
+    ]
+
     const extracted: ExtractedTask[] = []
 
-    for (const line of lines) {
-      const lower = line.toLowerCase()
-      const hasAction = actionKeywords.some((kw) => lower.includes(kw))
+    for (const sentence of sentences) {
+      const lower = sentence.toLowerCase()
+      const isAction = actionTriggers.some((t) => lower.includes(t))
 
-      if (hasAction && line.length > 10 && line.length < 180) {
+      if (isAction && sentence.length > 10 && sentence.length < 200) {
         let priority: 'high' | 'medium' | 'low' = 'medium'
-        if (lower.includes('urgent') || lower.includes('verify') || lower.includes('crossings')) priority = 'high'
-        if (lower.includes('optional') || lower.includes('later')) priority = 'low'
+        if (lower.includes('urgent') || lower.includes('verify') || lower.includes('exam')) {
+          priority = 'high'
+        } else if (lower.includes('optional') || lower.includes('maybe')) {
+          priority = 'low'
+        }
 
         extracted.push({
           id: `task-${Date.now()}-${extracted.length}`,
-          text: line,
+          text: sentence,
           priority,
-          sourceExcerpt: line,
-          dueDate: new Date(Date.now() + 7 * 24 * 3600 * 1000).toLocaleDateString(),
+          sourceExcerpt: sentence,
+          dueDate: new Date(Date.now() + 5 * 24 * 3600 * 1000).toLocaleDateString(),
         })
       }
     }
@@ -158,5 +144,9 @@ export class AiService {
       formula: '1 + K * G(s)H(s) = 0',
       confidence: 0.94,
     }
+  }
+
+  getSchemaSQL(): string {
+    return this.vectorStoreService.getPgVectorSchemaSQL()
   }
 }

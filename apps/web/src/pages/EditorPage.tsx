@@ -8,6 +8,8 @@ import {
 import { RichEditor } from '../components/RichEditor'
 import { CanvasBlock } from '../components/CanvasBlock'
 import { useAppStore } from '../store/appStore'
+import { syncClient } from '../services/syncClient'
+import { crdtProvider } from '../services/crdtProvider'
 
 const PAGE_ICONS = ['📄', '📊', '📈', '✏️', '🏗️', '🔄', '💡', '📚', '🎯', '⚙️', '🔬', '🧮', '💻', '⚡', '🧠', '🛡️']
 
@@ -50,6 +52,14 @@ export function EditorPage() {
 
   const activeNotebookId = currentNotebook?.id || 'nb-1'
   const activePageId = currentPage?.id || 'pg-1'
+
+  // Join CRDT room on backend
+  useEffect(() => {
+    syncClient.joinRoom(activePageId)
+  }, [activePageId])
+
+  // Get or initialize persistent Y.Doc with offline IndexedDB backing
+  const ydoc = crdtProvider.getOrCreateDoc(activePageId, currentPage?.content)
 
   const [title, setTitle] = useState(currentPage?.title ?? 'Untitled')
   const [pageIcon, setPageIcon] = useState(currentPage?.icon ?? '📄')
@@ -474,6 +484,7 @@ export function EditorPage() {
           {/* Rich text editor keyed by pageId so content resets properly per page */}
           <RichEditor
             key={activePageId}
+            ydoc={ydoc}
             content={currentPage?.content}
             onChange={(html) => {
               updatePage(activeNotebookId, activePageId, { content: html })
