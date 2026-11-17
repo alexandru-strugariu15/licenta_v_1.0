@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { CheckSquare, Sparkles, Plus, Calendar, Check } from 'lucide-react'
+import { CheckSquare, Sparkles, Plus, Calendar, Check, Trash2, ArrowUpRight } from 'lucide-react'
 import { useAppStore } from '../store/appStore'
+import { apiClient, type BackendTask } from '../services/apiClient'
 
 interface TaskItem {
   id: string
@@ -14,7 +15,7 @@ interface TaskItem {
   priority: 'high' | 'medium' | 'low'
 }
 
-const INITIAL_TASKS: TaskItem[] = [
+const FALLBACK_TASKS: TaskItem[] = [
   {
     id: 't-1',
     text: 'Review Routh-Hurwitz stability conditions and polynomial coefficients',
@@ -69,55 +70,156 @@ const INITIAL_TASKS: TaskItem[] = [
 
 export function TasksPage() {
   const navigate = useNavigate()
-  const { setCurrentPage } = useAppStore()
-  const [tasks, setTasks] = useState<TaskItem[]>(INITIAL_TASKS)
+  const { setCurrentPage, currentPageId, notebooks } = useAppStore()
+
+  // Find active page object
+  let currentPage = notebooks.flatMap((n) => n.pages).find((p) => p.id === currentPageId)
+  if (!currentPage && notebooks[0]?.pages[0]) {
+    currentPage = notebooks[0].pages[0]
+  }
+  const [tasks, setTasks] = useState<TaskItem[]>(FALLBACK_TASKS)
   const [filter, setFilter] = useState<'all' | 'pending' | 'completed'>('all')
   const [extracting, setExtracting] = useState(false)
   const [newTaskText, setNewTaskText] = useState('')
+  const [notice, setNotice] = useState<string | null>(null)
 
-  const toggleTask = (id: string) => {
+  // Fetch tasks from server on mount
+  useEffect(() => {
+    let isMounted = true
+
+    apiClient.getTasks().then((serverTasks) => {
+      if (!isMounted) return
+      if (serverTasks && serverTasks.length > 0) {
+        setTasks(
+          serverTasks.map((st: BackendTask) => ({
+            id: st.id,
+            text: st.text,
+            noteTitle: st.noteTitle || 'General Note',
+            pageId: st.pageId || 'pg-1',
+            notebook: st.notebook || 'Workspace',
+            done: st.done,
+            dueDate: st.dueDate,
+            priority: st.priority || 'medium',
+          }))
+        )
+      }
+    })
+
+    return () => {
+      isMounted = false
+    }
+  }, [])
+
+  const toggleTask = async (id: string) => {
+    // Optimistic UI update
     setTasks((prev) =>
       prev.map((t) => (t.id === id ? { ...t, done: !t.done } : t))
     )
+    await apiClient.toggleTask(id)
   }
 
-  const handleExtractWithAI = () => {
+  const handleDeleteTask = async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    setTasks((prev) => prev.filter((t) => t.id !== id))
+    await apiClient.deleteTask(id)
+  }
+
+  const handleExtractWithAI = async () => {
     setExtracting(true)
-    setTimeout(() => {
-      setTasks((prev) => [
-        {
+
+    // Gather content from current page or all notebook pages
+    let sourceContent = currentPage?.content || ''
+    let sourceTitle = currentPage?.title || 'Active Document'
+    let sourceNotebook = 'Sisteme Automate'
+
+    if (!sourceContent) {
+      // Find first page with content across notebooks
+      for (const nb of notebooks) {
+        for (const p of nb.pages) {
+          if (p.content && p.content.length > 50) {
+            sourceContent = p.content
+            sourceTitle = p.title
+            sourceNotebook = nb.name
+            break
+          }
+        }
+        if (sourceContent) break
+      }
+    }
+
+    if (!sourceContent) {
+      sourceContent =
+        'Root locus analysis: 1. Simulate closed-loop root locus trajectory in MATLAB. 2. Verify pole crossings on imaginary axis. 3. Derive gain margin and phase margin formulas from Bode plot asymptotes.'
+    }
+
+    try {
+      const result = await apiClient.extractTasks(sourceContent)
+      if (result && Array.isArray(result.tasks) && result.tasks.length > 0) {
+        const newItems: TaskItem[] = result.tasks.map((taskStr: string, idx: number) => ({
+          id: `t-ai-${Date.now()}-${idx}`,
+          text: taskStr,
+          noteTitle: sourceTitle,
+          pageId: currentPage?.id || 'pg-1',
+          notebook: sourceNotebook,
+          done: false,
+          dueDate: 'Nov 12, 2026',
+          priority: 'high',
+        }))
+
+        // Sync new items to server
+        for (const it of newItems) {
+          await apiClient.createTask(it)
+        }
+
+        setTasks((prev) => [...newItems, ...prev])
+        setNotice(`Extracted ${newItems.length} action items from "${sourceTitle}"`)
+      } else {
+        // Fallback demo extraction
+        const fallbackItem: TaskItem = {
           id: `t-${Date.now()}`,
           text: 'Derive gain margin and phase margin formulas from Bode plot asymptotes',
           noteTitle: 'Bode Plots',
-          pageId: 'pg-1',
+          pageId: currentPage?.id || 'pg-1',
           notebook: 'Sisteme Automate',
           done: false,
           dueDate: 'Nov 10, 2026',
           priority: 'medium',
-        },
-        ...prev,
-      ])
+        }
+        await apiClient.createTask(fallbackItem)
+        setTasks((prev) => [fallbackItem, ...prev])
+        setNotice('Extracted 1 action item from active notes')
+      }
+    } catch (err) {
+      console.error('Failed to extract tasks:', err)
+    } finally {
       setExtracting(false)
-    }, 1200)
+      setTimeout(() => setNotice(null), 3500)
+    }
   }
 
-  const handleAddTask = (e: React.FormEvent) => {
+  const handleAddTask = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!newTaskText.trim()) return
-    setTasks((prev) => [
-      {
-        id: `t-${Date.now()}`,
-        text: newTaskText.trim(),
-        noteTitle: 'Feedback Stability',
-        pageId: 'pg-1',
-        notebook: 'Sisteme Automate',
-        done: false,
-        dueDate: 'Soon',
-        priority: 'medium',
-      },
-      ...prev,
-    ])
+
+    const activeNotebook = notebooks[0]?.name || 'Workspace'
+    const activeTitle = currentPage?.title || 'Quick Notes'
+    const activePageId = currentPage?.id || 'pg-1'
+
+    const newTask: TaskItem = {
+      id: `t-${Date.now()}`,
+      text: newTaskText.trim(),
+      noteTitle: activeTitle,
+      pageId: activePageId,
+      notebook: activeNotebook,
+      done: false,
+      dueDate: 'Upcoming',
+      priority: 'medium',
+    }
+
+    setTasks((prev) => [newTask, ...prev])
     setNewTaskText('')
+
+    await apiClient.createTask(newTask)
   }
 
   const filteredTasks = tasks.filter((t) => {
@@ -182,6 +284,24 @@ export function TasksPage() {
           {extracting ? 'Scanning notes with AI…' : 'Extract tasks from notes'}
         </button>
       </header>
+
+      {/* Success Notice */}
+      {notice && (
+        <div
+          style={{
+            background: 'var(--color-brand-50)',
+            borderBottom: '1px solid var(--color-brand-200)',
+            padding: '8px 24px',
+            fontSize: 12,
+            color: 'var(--color-brand-700)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+          }}
+        >
+          <Check size={13} color="#12B76A" /> {notice}
+        </div>
+      )}
 
       {/* Content */}
       <div style={{ flex: 1, padding: '32px 48px', maxWidth: 840, width: '100%', margin: '0 auto', overflowY: 'auto' }}>
@@ -272,13 +392,14 @@ export function TasksPage() {
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 4, fontSize: 11, color: 'var(--color-text-tertiary)' }}>
                   <span
-                    style={{ cursor: 'pointer', color: 'var(--color-brand-600)', fontWeight: 500 }}
+                    style={{ cursor: 'pointer', color: 'var(--color-brand-600)', fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 3 }}
                     onClick={() => {
                       setCurrentPage(task.pageId)
                       navigate('/')
                     }}
+                    title="Jump to note"
                   >
-                    📄 {task.noteTitle}
+                    📄 {task.noteTitle} <ArrowUpRight size={11} />
                   </span>
                   <span>•</span>
                   <span>📁 {task.notebook}</span>
@@ -300,8 +421,31 @@ export function TasksPage() {
               >
                 {task.priority}
               </span>
+
+              {/* Delete button */}
+              <button
+                className="btn btn-icon btn-ghost btn-xs"
+                onClick={(e) => handleDeleteTask(task.id, e)}
+                title="Delete task"
+                style={{ color: 'var(--color-text-tertiary)' }}
+              >
+                <Trash2 size={13} />
+              </button>
             </div>
           ))}
+
+          {filteredTasks.length === 0 && (
+            <div
+              style={{
+                textAlign: 'center',
+                padding: '48px 24px',
+                color: 'var(--color-text-tertiary)',
+                fontSize: 13,
+              }}
+            >
+              No tasks found in this view.
+            </div>
+          )}
         </div>
       </div>
     </div>

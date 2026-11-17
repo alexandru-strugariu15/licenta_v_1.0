@@ -5,6 +5,7 @@ import {
 } from 'lucide-react'
 import { getStroke } from 'perfect-freehand'
 import type { CanvasStroke } from '../store/appStore'
+import { syncClient } from '../services/syncClient'
 
 type Tool = 'select' | 'pen' | 'highlighter' | 'eraser' | 'lasso' | 'shapes' | 'text'
 
@@ -25,6 +26,7 @@ export function CanvasBlock({ initialStrokes = [], onStrokesChange }: CanvasBloc
   const [strokeWidth, setStrokeWidth] = useState(4)
   const [strokes, setStrokes] = useState<CanvasStroke[]>(initialStrokes)
   const [liveStroke, setLiveStroke] = useState<[number, number, number][]>([])
+  const [remoteLiveStroke, setRemoteLiveStroke] = useState<[number, number, number][]>([])
   const [isDrawing, setIsDrawing] = useState(false)
   const [history, setHistory] = useState<CanvasStroke[][]>([initialStrokes])
   const [historyIndex, setHistoryIndex] = useState(0)
@@ -33,6 +35,27 @@ export function CanvasBlock({ initialStrokes = [], onStrokesChange }: CanvasBloc
   const HEIGHT = 440
 
   const [showAxes, setShowAxes] = useState(true)
+
+  // Listen for remote collaborative strokes & awareness
+  useEffect(() => {
+    const unsubStroke = syncClient.onStroke((incoming: CanvasStroke) => {
+      setStrokes((prev) => {
+        if (prev.some((s) => s.id === incoming.id)) return prev
+        const updated = [...prev, incoming]
+        onStrokesChange?.(updated)
+        return updated
+      })
+    })
+
+    const unsubLive = syncClient.onLiveStroke((data) => {
+      setRemoteLiveStroke(data.points || [])
+    })
+
+    return () => {
+      unsubStroke()
+      unsubLive()
+    }
+  }, [onStrokesChange])
 
   // Notify parent on change
   const updateStrokes = useCallback((newStrokes: CanvasStroke[]) => {
@@ -130,11 +153,20 @@ export function CanvasBlock({ initialStrokes = [], onStrokesChange }: CanvasBloc
       drawStroke(ctx, stroke.points, stroke.color, stroke.width, stroke.opacity, stroke.tool === 'highlighter')
     })
 
-    // Draw live stroke
+    // Draw local live stroke
     if (liveStroke.length > 1) {
       drawStroke(ctx, liveStroke, activeColor, strokeWidth, activeTool === 'highlighter' ? 0.35 : 1, activeTool === 'highlighter')
     }
-  }, [strokes, liveStroke, activeColor, strokeWidth, activeTool, showAxes])
+
+    // Draw remote collaborator live stroke
+    if (remoteLiveStroke.length > 1) {
+      drawStroke(ctx, remoteLiveStroke, '#EE46BC', 3, 0.85, false)
+      const lastPt = remoteLiveStroke[remoteLiveStroke.length - 1]
+      ctx.fillStyle = '#EE46BC'
+      ctx.font = '600 11px Inter, sans-serif'
+      ctx.fillText('Maya Chen (drawing…)', lastPt[0] + 8, lastPt[1] - 8)
+    }
+  }, [strokes, liveStroke, remoteLiveStroke, activeColor, strokeWidth, activeTool, showAxes])
 
   useEffect(() => { render() }, [render])
 
@@ -193,7 +225,14 @@ export function CanvasBlock({ initialStrokes = [], onStrokesChange }: CanvasBloc
 
   function onPointerMove(e: React.PointerEvent) {
     if (!isDrawing) return
-    setLiveStroke((pts) => [...pts, getCanvasPoint(e)])
+    const pt = getCanvasPoint(e)
+    setLiveStroke((pts) => {
+      const next: [number, number, number][] = [...pts, pt]
+      if (next.length % 3 === 0) {
+        syncClient.sendLiveStroke(next)
+      }
+      return next
+    })
   }
 
   function onPointerUp() {
@@ -211,6 +250,8 @@ export function CanvasBlock({ initialStrokes = [], onStrokesChange }: CanvasBloc
       }
       const newStrokes = [...strokes, newStroke]
       updateStrokes(newStrokes)
+      syncClient.sendStroke(newStroke)
+      syncClient.sendLiveStroke([])
 
       // Update history
       const newHistory = history.slice(0, historyIndex + 1)

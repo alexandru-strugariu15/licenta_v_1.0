@@ -178,6 +178,31 @@ export class SyncGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     })
   }
 
+  /**
+   * Stroke-level sync for Canvas Drawing
+   */
+  @SubscribeMessage('crdt-stroke')
+  handleCrdtStroke(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { roomId: string; stroke: any }
+  ) {
+    client.to(payload.roomId).emit('crdt-stroke', {
+      senderId: client.id,
+      stroke: payload.stroke,
+    })
+  }
+
+  @SubscribeMessage('crdt-live-stroke')
+  handleCrdtLiveStroke(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { roomId: string; points: any }
+  ) {
+    client.to(payload.roomId).emit('crdt-live-stroke', {
+      senderId: client.id,
+      points: payload.points,
+    })
+  }
+
   // ===========================================================================
   // WebRTC P2P Proximity Signaling Handlers
   // ===========================================================================

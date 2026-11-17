@@ -125,4 +125,53 @@ export const apiClient = {
       return []
     }
   },
+
+  /**
+   * Create a new task
+   */
+  async createTask(task: Partial<BackendTask>): Promise<BackendTask | null> {
+    try {
+      const res = await fetch(`${API_BASE}/tasks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(task),
+        signal: AbortSignal.timeout(3000),
+      })
+      if (!res.ok) return null
+      return await res.json()
+    } catch {
+      return null
+    }
+  },
+
+  /**
+   * Toggle task completion
+   */
+  async toggleTask(id: string): Promise<BackendTask | null> {
+    try {
+      const res = await fetch(`${API_BASE}/tasks/${id}/toggle`, {
+        method: 'PATCH',
+        signal: AbortSignal.timeout(3000),
+      })
+      if (!res.ok) return null
+      return await res.json()
+    } catch {
+      return null
+    }
+  },
+
+  /**
+   * Delete a task
+   */
+  async deleteTask(id: string): Promise<boolean> {
+    try {
+      const res = await fetch(`${API_BASE}/tasks/${id}`, {
+        method: 'DELETE',
+        signal: AbortSignal.timeout(3000),
+      })
+      return res.ok
+    } catch {
+      return false
+    }
+  },
 }

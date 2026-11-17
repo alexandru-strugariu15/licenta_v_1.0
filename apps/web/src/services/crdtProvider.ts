@@ -1,6 +1,7 @@
 import * as Y from 'yjs'
 import { IndexeddbPersistence } from 'y-indexeddb'
 import { syncClient } from './syncClient'
+import { uint8ArrayToBase64, base64ToUint8Array } from '../utils/binaryUtils'
 
 interface DocumentCRDT {
   pageId: string
@@ -38,7 +39,7 @@ class CrdtProviderManager {
     ydoc.on('update', (update: Uint8Array, origin: any) => {
       // Avoid echo loops if the update came from remote sync
       if (origin !== 'remote-sync') {
-        const base64 = Buffer.from(update).toString('base64')
+        const base64 = uint8ArrayToBase64(update)
         syncClient.sendUpdate(base64)
       }
     })
@@ -46,7 +47,7 @@ class CrdtProviderManager {
     // 3. Receive remote updates from server / peers
     const unsubscribeUpdate = syncClient.onUpdate((base64Update: string) => {
       try {
-        const binaryUpdate = Buffer.from(base64Update, 'base64')
+        const binaryUpdate = base64ToUint8Array(base64Update)
         Y.applyUpdate(ydoc, binaryUpdate, 'remote-sync')
       } catch (err) {
         console.error('Failed to apply incoming CRDT update:', err)
